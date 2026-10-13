@@ -640,8 +640,8 @@ Works, and obtain a legal opinion before distributing a combined database.
 
 ## Researched by
 
-GitHub handle: **Unknown** — the contributor opening this pull request should replace
-this with their own handle before submitting.
+GitHub handle: **@abeenoch** (researched and authored by the contributor opening
+issue #6).
 
 Date checked: **2026-10-11** — all live queries against `overpass-api.de`, the Geofabrik
 Africa index, and the ODbL/OSMF policy pages were verified on this date. Terms and
