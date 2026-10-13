@@ -79,8 +79,16 @@ open to all, subject to fair-use quotas rather than credentials.
 (Confirmed by fetching `https://overpass-api.de/api/interpreter` and
 `https://download.geofabrik.de/` with no credentials of any kind.)
 
-Practical caveat found while testing: requests **without a `User-Agent` header are
-rejected with HTTP 406 Not Acceptable**. A descriptive User-Agent identifying the
+Practical caveat, observed while testing: on the instance used here
+(`overpass-api.de`), requests **without a `User-Agent` header are rejected with
+HTTP 406 Not Acceptable**. This is an instance-specific observation, not a
+universal rule of the Overpass protocol — but regardless of instance, a
+descriptive User-Agent should always be sent. The OSMF API Usage Policy requires
+a "Valid User-Agent identifying application and version" and warns that "Faking
+another app's User-Agent WILL get you blocked". Note that this policy governs the
+OSMF **editing API**, and does not automatically bind every third-party Overpass
+mirror; test the selected instance's behaviour directly.
+(https://operations.osmfoundation.org/policies/api/)
 
 ## Geographic coverage
 
@@ -154,8 +162,9 @@ version. Faking another app's User-Agent WILL get you blocked.").
 ## Identifiers
 
 Every element carries a global **`id`**, combined with its **`type`** to form the
-unique key. Ids are assigned sequentially at creation and are effectively permanent —
-deleting an element frees its id but it is not reused.
+unique key. Ids are assigned sequentially at creation and should be treated as stable
+type-scoped identifiers. Deletion is recorded in OSM's history; do not assume a deleted
+element's id is freed for reuse — treat ids as non-recyclable application keys.
 
 **Critical caveat:** nodes, ways and relations **do not share an id space**. The same
 numeric id can refer to a node and a relation simultaneously. Any key must therefore
@@ -201,7 +210,7 @@ Distinct time values Africa Pulse should keep separate:
 | Field | Meaning |
 |---|---|
 | Element `timestamp` | last modification of that element (UTC) |
-| `timestamp_osm_base` (response header) | currency of the whole response dataset (UTC) |
+| `timestamp_osm_base` (JSON `osm3s` metadata field, not an HTTP header) | currency of the whole response dataset (UTC) |
 | Africa Pulse ingest time | when we fetched it — must be recorded locally |
 
 **Implication:** element `timestamp` must not be treated as an event time or used for
@@ -216,9 +225,13 @@ comes from the key, so units are conventional rather than enforced.
 - **Coordinates:** decimal degrees, WGS 84 (EPSG:4326). Node `lat`/`lon`; way geometry
   as arrays of `{lat, lon}`. Positive lat = north, positive lon = east — Accra is
   ~`5.55, -0.18`, so its longitude is negative (west of Greenwich).
-- **Distances / dimensions:** metric by convention. `maxspeed` is **km/h** (the Accra
-  sample returned `"maxspeed": "50"` meaning 50 km/h). Heights, widths, lengths and
-  `ele` (elevation) are metres.
+- **Distances / dimensions:** metric by convention, but values are free-form strings and
+  units are *not globally enforced* — a `maxspeed` value may be a bare number, carry an
+  explicit unit suffix (e.g. `30 mph`), or rely on local convention. The Accra sample
+  returned `"maxspeed": "50"`, which in Ghana's context reads as 50 km/h, but that is
+  this specific sample's interpretation only. Heights, widths, lengths and `ele`
+  (elevation) are conventionally metres. Parse the actual tag representation and validate
+  regional conventions rather than assuming a unit.
 - **No currency fields** in the core schema. Where present (e.g. `fee`, `charge`) the
   currency is generally *not* stated in the tag and must not be assumed.
 - **Untyped values:** tags such as `"lanes": "2"`, `"oneway": "yes"`, `"lit": "yes"` are
@@ -232,8 +245,9 @@ comes from the key, so units are conventional rather than enforced.
 Because the schema is open, **any tag not in a known allowlist is effectively unknown
 type** — Africa Pulse must validate and type-cast defensively rather than trust the tag.
 (Tag definitions, including units and the `;`-separated multi-value convention, are
-documented per-key at https://wiki.openstreetmap.org/wiki/Map_Features; `maxspeed`
-in km/h specifically at https://wiki.openstreetmap.org/wiki/Key:maxspeed.)
+documented per-key at https://wiki.openstreetmap.org/wiki/Map_Features; the `maxspeed`
+unit convention is at https://wiki.openstreetmap.org/wiki/Key:maxspeed — note that
+`maxspeed` may carry an explicit unit and should not be assumed to be km/h.)
 
 
 ## Rate limits
@@ -269,8 +283,21 @@ against the live `https://overpass-api.de/api/status` output quoted below.)
 
 **Observed during this research (2026-10-11):** several legitimate small queries were
 refused with **504** while the server was load-shedding, and succeeded on retry.
-A production connector must therefore implement **retry with backoff and treat 429/504
-as expected, not exceptional**.
+A production connector must therefore **treat 429/5xx, timeouts and connection
+failures as expected, not exceptional**. The 429/504 mapping above reflects common
+observed behaviour, not an exhaustive or universal contract, so clients should also
+handle other 5xx responses, transport timeouts and malformed bodies.
+
+**Required retry behaviour (audit note):**
+
+- Use **bounded** retries with **exponential backoff plus jitter** — do not retry
+  endlessly.
+- Honour a `Retry-After` header when the server supplies one.
+- **Distinguish transient from persistent failures.** A 429 or 504 under load is
+  transient and worth retrying; a genuine query error (malformed Overpass QL, a bad
+  tag filter) will fail identically every time — that is a defect to fix, not a
+  condition to retry forever.
+- Add caching in front of the API to keep repeat traffic off the shared instance.
 
 Verbatim live `https://overpass-api.de/api/status` response (2026-10-11), showing the
 4-slot quota and the 1:1 slot-availability delay in practice:
@@ -313,35 +340,45 @@ shared infrastructure.
 ODbL distinguishes two categories of output, and the obligations differ sharply
 (https://opendatacommons.org/licenses/odbl/1-0/):
 
-1. **Produced Work** (ODbL §1.0, §4.5) — a *result* that does not require copying a
+1. **Produced Work** (ODbL 1.0, 4.5) — a *result* that does not require copying a
    substantial part of the database, e.g. a chart, a rendered map, a report, or an
    aggregate statistic. A Produced Work is **not** subject to share-alike: you may
    publish it under your own terms. **You must still attribute** (ODbL §4.5 requires
    the attribution notice and licence reference where technically feasible).
 
-2. **Derivative Database** (ODbL §1.0, §4.5, §5.1.1) — a database you build by
+2. **Derivative Database** (ODbL 1.0, 4.5, 5.1.1) — a database you build by
    adapting or incorporating a substantial part of the OSM database. This **is**
    subject to share-alike: it must be offered under **ODbL** (or a future version, or a
-   compatible licence per §4.4), with the notice required by §4.6, and the public-use
-   provision of §4.7 applies.
+   compatible licence per 4.4), with the notice required by 4.6, and the public-use
+   provision of 4.7 applies.
 
-Applied to Africa Pulse's warehouse, the decisive question is therefore:
+Applied to Africa Pulse's warehouse, the decisive question is therefore — and the
+honest answer is that **it is case-specific, not settled by a general rule**:
 
-- If OSM elements are **loaded and stored** in the warehouse alongside weather, air
-  quality, FX and other data, that combined warehouse is best treated as a
-  **Derivative Database with respect to the OSM portion**, and share-alike attaches.
-- Share-alike under ODbL operates on the **database as a whole or a substantial part**,
-  not merely on OSM rows in isolation. Practically this means: **do not assume that
-  mixing OSM rows with proprietary or differently-licensed rows into one distributable
-  table is risk-free.** The safest architecture is to keep OSM-derived data in
-  clearly separated tables, tagged with provenance, so the share-alike boundary is
-  explicit and the rest of the warehouse is not entangled.
-- **Produced Works are the safe path for outputs.** Analytical marts, dashboards,
-  metrics and reports built *from* OSM data are Produced Works: publishable under
-  Africa Pulse's own Apache-2.0 licence, with attribution — no share-alike on the
-  mart itself.
-- A **Collective Database** (ODbL §1.0) — OSM in unmodified form merely *collected*
-  alongside other independent databases — is explicitly **not** a Derivative Database.
+- Whether loading OSM alongside weather, air quality, FX and other data creates a
+  **Derivative Database** depends on what is actually done to the data: adaptation,
+  selection, transformation, and how the records are combined. Merely storing OSM in
+  a warehouse is not by itself adaptation. ODbL explicitly recognises **Collective
+  Databases** (ODbL 1.0, §1.0) — OSM left in unmodified form, merely *collected*
+  alongside other independent databases — which are **not** Derivative Databases.
+- If OSM data **is** adapted, or a substantial part is incorporated into a database
+  built from it, the result is a Derivative Database and share-alike attaches to that
+  database as a whole or a substantial part.
+- **Separating OSM rows into their own tables is good provenance practice but is not a
+  legal safe harbour.** Partitioning does not by itself decide the licence boundary.
+  What determines it is the schema, the transformations, the lineage, and how the
+  data is exported and distributed.
+- **Produced Works are often the safe path for outputs** — a chart, a rendered map, a
+  report, or an aggregate statistic is a Produced Work and is not share-alike. But
+  *not every analytical mart is automatically a Produced Work*: if a mart is designed
+  so the underlying OSM data can be extracted from it, or if it embeds a database
+  derived from OSM, the analysis changes. Do not promise blanket Apache-2.0 release
+  for every mart without case-specific review.
+
+**This is a licensing analysis, not legal advice.** Before any public distribution of
+a combined warehouse or derived product, document the data lineage and obtain a
+qualified legal opinion on the concrete schema, transformation pipeline, and
+distribution model — the ODbL itself warns that database rights vary by jurisdiction.
   Storing unmodified OSM extracts next to other data, without adaptation, stays in this
   category.
 
@@ -426,10 +463,15 @@ response itself carries the required copyright and ODbL notice.
   missing User-Agent. One mirror (`overpass.kumi.systems`) returned **500** during
   testing. Public instances are best-effort shared infrastructure, not an SLA-backed
   service, and OSMF notes access "may be withdrawn at any point".
-- **No SLA, no support.** No corporate owner, no formal uptime commitment, no paid tier.
-  Sustained production volume requires **self-hosting** an Overpass instance or using
-  bulk extracts — the documentation states that only running your own instance
-  "sustainably serves your mission" for high-demand use.
+- **No SLA on the public instance.** The specific public Overpass instance used here
+  (`overpass-api.de`) is best-effort shared infrastructure with no service-level
+  commitment unless its operator states otherwise; OSMF notes access to its shared
+  services "may be withdrawn at any point". This is a statement about *this public
+  instance*, not the whole ecosystem — third-party providers do sell hosted Overpass
+  access and support, so a commercial option exists if reliability requirements demand
+  one. For sustained production volume, evaluate hosted providers, regional extracts
+  with diff pipelines, or self-hosting, chosen against the measured workload rather
+  than assumed to require self-hosting.
 - **History is awkward.** Reconstructing an arbitrary past OSM state is not directly
   supported by Overpass; full history files are personal-data restricted on Geofabrik.
 - **Not a time-series source.** OSM provides geographic *reference* data, not dated
@@ -494,8 +536,9 @@ way[highway=primary](5.55,-0.20,5.60,-0.15);
 out geom 1;
 ```
 
-Response (trimmed; geometry vertices reduced from 5 to 3 for brevity, coordinates
-unmodified — this is `Independence Avenue` in Accra, and `maxspeed` is km/h):
+Response (trimmed; the three coordinate pairs shown are copied unchanged with
+intermediate vertices omitted — this is `Independence Avenue` in Accra; its `maxspeed`
+value `"50"` reads as 50 km/h under Ghana's local convention):
 
 ```json
 {
@@ -602,23 +645,31 @@ and Attribution requirements sections above.
 
 ## Assessment
 
-**Verdict: strong fit for the geospatial backbone, with two caveats that must be
-designed around.**
+**Verdict: a strong, widely used open-data candidate for the geospatial backbone, with
+several caveats that must be designed around.**
 
 Why it fits Africa Pulse:
 
-- It is the only practical open source for **African city boundaries, administrative
-  geographies, road networks and POIs** at the granularity this platform needs. The
-  alternative is purchasing commercial geodata.
-- **No authentication, no cost, no commercial restriction** — the cheapest source in
-  the register by far.
-- **Near-real-time via Overpass** (`timestamp_osm_base` ~1 minute behind live), with
-  daily bulk extracts as a fallback.
+- It is a strong, widely used open-data candidate for **African city boundaries,
+  administrative geographies, road networks and POIs** at the granularity this platform
+  needs. The main alternative is purchasing commercial geodata; other open options
+  should be compared against required city coverage, accuracy, licensing, and update
+  cadence before concluding OSM is the best fit.
+- **No API key is ordinarily needed for the public endpoints used here, and ODbL
+  permits commercial use** — but note that no credentials ≠ guaranteed availability:
+  infrastructure uptime, provider terms and compliance work are separate concerns.
+- **Near-real-time via Overpass** — the sampled response on 2026-10-11 was about 50
+  seconds behind the server clock, with daily bulk extracts as a fallback. This is a
+  dated observation, not a freshness guarantee; `timestamp_osm_base` should be
+  monitored continuously.
 - **Good entity-resolution hooks**: `wikidata`/`wikipedia` tags and stable `(type, id)`
   keys let OSM act as the spatial join key tying the other sources together —
   directly serving design principle 5, "Cities are configuration, not architecture".
-- Licence is permissive for the outputs Africa Pulse cares about: analytical marts and
-  reports are Produced Works, publishable under Apache-2.0 with attribution.
+  Note these external identifiers are optional and may be missing or wrong.
+- Licence is permissive for the outputs Africa Pulse cares about: charts, rendered
+  maps, reports and aggregate statistics are Produced Works, publishable under
+  Apache-2.0 with attribution — subject to case-specific review per the Terms of use
+  section above.
 
 Risks and required mitigations:
 
@@ -630,13 +681,21 @@ Risks and required mitigations:
 | Element `timestamp` ≠ event time | Never use it for freshness/trends; measure against `timestamp_osm_base` and ingest time |
 | Id spaces are type-scoped | Composite primary key `(type, id)` |
 | 429/504 load-shedding, no SLA | Retry with backoff; cache; fall back to bulk extracts; self-host if volume grows |
-| **ODbL share-alike on a combined warehouse** | **Keep OSM-derived tables clearly separated and provenance-tagged; treat the combined DB as a Derivative Database w.r.t. OSM; get legal review before public distribution** |
+| **ODbL share-alike on a combined warehouse** | **Classification depends on the actual transformations and distribution model, not on table layout. Keep OSM-derived tables separated and provenance-tagged for governance, document lineage, and get legal review before public distribution** |
 
-The share-alike question raised in the issue is the one genuinely strategic item here.
-OSM is not merely another feed to load — because its licence propagates to adapted
-databases, it constrains how the warehouse may be assembled and redistributed. The
-clean resolution is architectural: isolate OSM-derived data, keep outputs as Produced
-Works, and obtain a legal opinion before distributing a combined database.
+The share-alike question raised in the issue is the most strategically significant
+item here, and the honest answer is that it cannot be settled by this document. ODbL
+draws a distinction that turns on what is actually *done* to the data — adaptation,
+selection, transformation and how information is combined — not on how tables are
+laid out. Putting OSM rows in separate tables is useful provenance governance, but it
+is not by itself a legal boundary. Loading OSM alongside weather, air quality, FX and
+other data does not automatically make every combined dataset a Derivative Database;
+equally, a mart or report is not automatically a Produced Work if it lets the
+underlying OSM data be extracted from it. So the practical path is: keep OSM-derived
+data separated and provenance-tagged, document transformations and lineage, treat
+rendered outputs and aggregate statistics as the safest route to publication, and
+obtain a qualified legal opinion on the concrete schema, pipeline and distribution
+model before releasing anything publicly. See the Terms of use section above.
 
 ## Researched by
 
